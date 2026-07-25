@@ -1,0 +1,708 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+# Universal SMTP Relay installer for Debian/Ubuntu.
+# This script configures Postfix as an authenticated SMTP relay on a custom port.
+
+SCRIPT_NAME="$(basename "$0")"
+MANAGED_BEGIN="# BEGIN MANAGED SMTP RELAY"
+MANAGED_END="# END MANAGED SMTP RELAY"
+
+log() {
+  printf '\n\033[1;34m>>> %s\033[0m\n' "$*"
+}
+
+warn() {
+  printf '\n\033[1;33mWARNING: %s\033[0m\n' "$*" >&2
+}
+
+fail() {
+  printf '\n\033[1;31mERROR: %s\033[0m\n' "$*" >&2
+  exit 1
+}
+
+need_root() {
+  [[ "${EUID}" -eq 0 ]] || fail "请使用 root 运行：sudo bash ${SCRIPT_NAME}"
+}
+
+need_debian_like() {
+  command -v apt-get >/dev/null 2>&1 || fail "当前脚本只支持 Debian / Ubuntu 系统。"
+}
+
+read_default() {
+  local prompt="$1"
+  local default="$2"
+  local value=""
+  read -r -p "${prompt} [${default}]: " value
+  printf '%s' "${value:-$default}"
+}
+
+read_required() {
+  local prompt="$1"
+  local value=""
+  while [[ -z "$value" ]]; do
+    read -r -p "${prompt}: " value
+    [[ -n "$value" ]] || echo "不能为空，请重新输入。"
+  done
+  printf '%s' "$value"
+}
+
+read_secret_required() {
+  local prompt="$1"
+  local value=""
+  while [[ -z "$value" ]]; do
+    read -r -s -p "${prompt}: " value
+    printf '\n' >&2
+    [[ -n "$value" ]] || echo "不能为空，请重新输入。" >&2
+  done
+  printf '%s' "$value"
+}
+
+confirm_secret() {
+  local prompt="$1"
+  local first=""
+  local second=""
+  while true; do
+    first="$(read_secret_required "$prompt")"
+    second="$(read_secret_required "请再次输入确认")"
+    if [[ "$first" == "$second" ]]; then
+      printf '%s' "$first"
+      return 0
+    fi
+    echo "两次输入不一致，请重新输入。"
+  done
+}
+
+trim() {
+  local value="$1"
+  value="${value#"${value%%[![:space:]]*}"}"
+  value="${value%"${value##*[![:space:]]}"}"
+  printf '%s' "$value"
+}
+
+normalize_cidrs() {
+  local raw="$1"
+  local result=""
+  local item=""
+  IFS=',' read -ra parts <<< "$raw"
+  for item in "${parts[@]}"; do
+    item="$(trim "$item")"
+    [[ -z "$item" ]] && continue
+    if [[ "$item" != */* ]]; then
+      item="${item}/32"
+    fi
+    if [[ -z "$result" ]]; then
+      result="$item"
+    else
+      result="${result},${item}"
+    fi
+  done
+  printf '%s' "$result"
+}
+
+validate_port() {
+  local port="$1"
+  [[ "$port" =~ ^[0-9]+$ ]] || fail "端口必须是数字：${port}"
+  (( port >= 1 && port <= 65535 )) || fail "端口范围必须是 1-65535：${port}"
+}
+
+is_valid_domain() {
+  local domain="$1"
+  [[ "$domain" =~ ^[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?(\.[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?)+$ ]]
+}
+
+default_hostname() {
+  hostname -f 2>/dev/null || hostname
+}
+
+backup_file() {
+  local file="$1"
+  local ts="$2"
+  if [[ -f "$file" ]]; then
+    cp -a "$file" "${file}.bak.${ts}"
+  fi
+}
+
+remove_managed_block() {
+  local file="$1"
+  python3 - "$file" "$MANAGED_BEGIN" "$MANAGED_END" <<'PY'
+import sys
+from pathlib import Path
+path = Path(sys.argv[1])
+begin = sys.argv[2]
+end = sys.argv[3]
+text = path.read_text()
+lines = text.splitlines(True)
+out = []
+skip = False
+for line in lines:
+    if line.rstrip('\n') == begin:
+        skip = True
+        continue
+    if skip and line.rstrip('\n') == end:
+        skip = False
+        continue
+    if not skip:
+        out.append(line)
+path.write_text(''.join(out))
+PY
+}
+
+select_provider() {
+  echo
+  echo "请选择上游 SMTP 服务商："
+  echo "  1) Gmail / Google Workspace                 smtp.gmail.com:587 STARTTLS"
+  echo "  2) Outlook / Hotmail 个人邮箱               smtp-mail.outlook.com:587 STARTTLS"
+  echo "  3) Microsoft 365 / Office 365               smtp.office365.com:587 STARTTLS"
+  echo "  4) Yahoo Mail                               smtp.mail.yahoo.com:587 STARTTLS"
+  echo "  5) Zoho Mail                                smtp.zoho.com:587 STARTTLS"
+  echo "  6) Amazon SES                               email-smtp.<region>.amazonaws.com:587 STARTTLS"
+  echo "  7) SendGrid                                 smtp.sendgrid.net:587 STARTTLS"
+  echo "  8) Mailgun                                  smtp.mailgun.org:587 STARTTLS"
+  echo "  9) Postmark                                 smtp.postmarkapp.com:587 STARTTLS"
+  echo " 10) Resend                                   smtp.resend.com:587 STARTTLS"
+  echo " 11) Mailtrap                                 live.smtp.mailtrap.io:587 STARTTLS"
+  echo " 12) QQ 邮箱                                  smtp.qq.com:465 SSL/TLS"
+  echo " 13) 163/网易邮箱                             smtp.163.com:465 SSL/TLS"
+  echo " 14) 自定义 SMTP"
+
+  local choice=""
+  choice="$(read_default "请选择" "3")"
+
+  UPSTREAM_PROVIDER="自定义"
+  UPSTREAM_HOST=""
+  UPSTREAM_PORT="587"
+  UPSTREAM_TLS_MODE="starttls"
+  UPSTREAM_USER_HINT="SMTP 用户名/邮箱"
+  UPSTREAM_PASSWORD_HINT="SMTP 密码、授权码、App Password 或 API Key"
+
+  case "$choice" in
+    1)
+      UPSTREAM_PROVIDER="Gmail / Google Workspace"
+      UPSTREAM_HOST="smtp.gmail.com"
+      UPSTREAM_PORT="587"
+      UPSTREAM_USER_HINT="Gmail/Google Workspace 邮箱"
+      UPSTREAM_PASSWORD_HINT="Gmail App Password（建议开启 2FA 后创建）"
+      ;;
+    2)
+      UPSTREAM_PROVIDER="Outlook / Hotmail 个人邮箱"
+      UPSTREAM_HOST="smtp-mail.outlook.com"
+      UPSTREAM_PORT="587"
+      UPSTREAM_USER_HINT="Outlook/Hotmail 邮箱"
+      UPSTREAM_PASSWORD_HINT="Outlook 密码或 App Password"
+      ;;
+    3)
+      UPSTREAM_PROVIDER="Microsoft 365 / Office 365"
+      UPSTREAM_HOST="smtp.office365.com"
+      UPSTREAM_PORT="587"
+      UPSTREAM_USER_HINT="Microsoft 365 邮箱"
+      UPSTREAM_PASSWORD_HINT="Microsoft 365 密码或 App Password；需确认 SMTP AUTH 已启用"
+      ;;
+    4)
+      UPSTREAM_PROVIDER="Yahoo Mail"
+      UPSTREAM_HOST="smtp.mail.yahoo.com"
+      UPSTREAM_PORT="587"
+      UPSTREAM_USER_HINT="Yahoo 邮箱"
+      UPSTREAM_PASSWORD_HINT="Yahoo App Password"
+      ;;
+    5)
+      UPSTREAM_PROVIDER="Zoho Mail"
+      UPSTREAM_HOST="smtp.zoho.com"
+      UPSTREAM_PORT="587"
+      UPSTREAM_USER_HINT="Zoho 邮箱"
+      UPSTREAM_PASSWORD_HINT="Zoho 密码或 App Password"
+      ;;
+    6)
+      UPSTREAM_PROVIDER="Amazon SES"
+      local region=""
+      region="$(read_default "Amazon SES region" "us-east-1")"
+      UPSTREAM_HOST="email-smtp.${region}.amazonaws.com"
+      UPSTREAM_PORT="587"
+      UPSTREAM_USER_HINT="Amazon SES SMTP Username"
+      UPSTREAM_PASSWORD_HINT="Amazon SES SMTP Password"
+      ;;
+    7)
+      UPSTREAM_PROVIDER="SendGrid"
+      UPSTREAM_HOST="smtp.sendgrid.net"
+      UPSTREAM_PORT="587"
+      UPSTREAM_USER_HINT="SendGrid 用户名，通常填 apikey"
+      UPSTREAM_PASSWORD_HINT="SendGrid API Key"
+      ;;
+    8)
+      UPSTREAM_PROVIDER="Mailgun"
+      UPSTREAM_HOST="smtp.mailgun.org"
+      UPSTREAM_PORT="587"
+      UPSTREAM_USER_HINT="Mailgun SMTP Login，例如 postmaster@mg.example.com"
+      UPSTREAM_PASSWORD_HINT="Mailgun SMTP Password"
+      ;;
+    9)
+      UPSTREAM_PROVIDER="Postmark"
+      UPSTREAM_HOST="smtp.postmarkapp.com"
+      UPSTREAM_PORT="587"
+      UPSTREAM_USER_HINT="Postmark Server API Token"
+      UPSTREAM_PASSWORD_HINT="Postmark Server API Token"
+      ;;
+    10)
+      UPSTREAM_PROVIDER="Resend"
+      UPSTREAM_HOST="smtp.resend.com"
+      UPSTREAM_PORT="587"
+      UPSTREAM_USER_HINT="Resend SMTP 用户名，通常填 resend"
+      UPSTREAM_PASSWORD_HINT="Resend API Key"
+      ;;
+    11)
+      UPSTREAM_PROVIDER="Mailtrap"
+      UPSTREAM_HOST="live.smtp.mailtrap.io"
+      UPSTREAM_PORT="587"
+      UPSTREAM_USER_HINT="Mailtrap SMTP 用户名"
+      UPSTREAM_PASSWORD_HINT="Mailtrap SMTP 密码或 Token"
+      ;;
+    12)
+      UPSTREAM_PROVIDER="QQ 邮箱"
+      UPSTREAM_HOST="smtp.qq.com"
+      UPSTREAM_PORT="465"
+      UPSTREAM_TLS_MODE="ssl"
+      UPSTREAM_USER_HINT="QQ 邮箱"
+      UPSTREAM_PASSWORD_HINT="QQ 邮箱 SMTP 授权码，不是 QQ 密码"
+      ;;
+    13)
+      UPSTREAM_PROVIDER="163/网易邮箱"
+      UPSTREAM_HOST="smtp.163.com"
+      UPSTREAM_PORT="465"
+      UPSTREAM_TLS_MODE="ssl"
+      UPSTREAM_USER_HINT="163/网易邮箱"
+      UPSTREAM_PASSWORD_HINT="网易邮箱客户端授权码，不是登录密码"
+      ;;
+    14)
+      UPSTREAM_PROVIDER="自定义 SMTP"
+      UPSTREAM_HOST="$(read_required "上游 SMTP 主机")"
+      UPSTREAM_PORT="$(read_default "上游 SMTP 端口" "587")"
+      validate_port "$UPSTREAM_PORT"
+      echo "请选择上游 SMTP 加密方式："
+      echo "  1) STARTTLS（常见端口 587）"
+      echo "  2) SSL/TLS wrapper/隐式 TLS（常见端口 465）"
+      local tls_choice=""
+      tls_choice="$(read_default "请选择" "1")"
+      case "$tls_choice" in
+        1) UPSTREAM_TLS_MODE="starttls" ;;
+        2) UPSTREAM_TLS_MODE="ssl" ;;
+        *) fail "无效上游 TLS 选择：${tls_choice}" ;;
+      esac
+      ;;
+    *)
+      fail "无效选择：${choice}"
+      ;;
+  esac
+}
+
+read_cert_domain() {
+  local prompt="$1"
+  local domain=""
+  while true; do
+    domain="$(read_required "$prompt")"
+    if is_valid_domain "$domain"; then
+      printf '%s' "$domain"
+      return 0
+    fi
+    echo "域名格式不正确，请输入类似 smtp-relay.example.com 的完整域名。"
+  done
+}
+
+select_tls_mode() {
+  echo
+  echo "请选择客户端到 Relay 的 TLS 证书方式："
+  echo "  1) 自动生成自签证书（最简单；客户端严格校验证书时可能需要允许自签）"
+  echo "  2) 自动申请 Let's Encrypt 正式证书（中文提示：需要域名解析到本机，并且 80 端口能从公网访问）"
+  echo "  3) 使用已有 Let's Encrypt 证书（只填域名，脚本自动选择 /etc/letsencrypt/live/<域名>/ 路径）"
+  echo "  4) 使用自定义证书目录（自己填目录；脚本自动读取目录里的 fullchain.pem 和 privkey.pem）"
+
+  TLS_MODE="$(read_default "请选择" "1")"
+  CERT_DIR="/etc/postfix/certs"
+  CERT_FILE="${CERT_DIR}/relay.crt"
+  KEY_FILE="${CERT_DIR}/relay.key"
+  CERT_DOMAIN=""
+  CUSTOM_CERT_DIR=""
+  CERT_SOURCE="自签证书"
+
+  case "$TLS_MODE" in
+    1)
+      MAILNAME="$(default_hostname)"
+      CERT_SOURCE="自签证书"
+      ;;
+    2)
+      echo
+      echo "Let's Encrypt 自动申请说明："
+      echo "  - 请先把 Relay 域名解析到这台弱服务器。"
+      echo "  - 请确保云安全组/防火墙临时放行 TCP 80。"
+      echo "  - 脚本会使用 certbot standalone 模式申请证书。"
+      echo "  - 脚本不会要求你填写邮箱，会使用 certbot 的无邮箱注册参数。"
+      CERT_DOMAIN="$(read_cert_domain "请输入 Relay 域名，例如 smtp-relay.example.com")"
+      MAILNAME="$CERT_DOMAIN"
+      CERT_SOURCE="Let's Encrypt 自动申请：${CERT_DOMAIN}"
+      ;;
+    3)
+      CERT_DOMAIN="$(read_cert_domain "请输入已有 Let's Encrypt 证书的域名")"
+      MAILNAME="$CERT_DOMAIN"
+      CERT_FILE="/etc/letsencrypt/live/${CERT_DOMAIN}/fullchain.pem"
+      KEY_FILE="/etc/letsencrypt/live/${CERT_DOMAIN}/privkey.pem"
+      CERT_SOURCE="已有 Let's Encrypt 证书：${CERT_DOMAIN}"
+      ;;
+    4)
+      CUSTOM_CERT_DIR="$(read_required "请输入证书目录，目录内必须有 fullchain.pem 和 privkey.pem")"
+      CUSTOM_CERT_DIR="${CUSTOM_CERT_DIR%/}"
+      CERT_FILE="${CUSTOM_CERT_DIR}/fullchain.pem"
+      KEY_FILE="${CUSTOM_CERT_DIR}/privkey.pem"
+      MAILNAME="$(default_hostname)"
+      CERT_SOURCE="自定义证书目录：${CUSTOM_CERT_DIR}"
+      ;;
+    *)
+      fail "无效 TLS 选择：${TLS_MODE}"
+      ;;
+  esac
+}
+
+install_packages() {
+  log "安装 Postfix、SASL、证书和测试工具"
+  export DEBIAN_FRONTEND=noninteractive
+  echo "postfix postfix/mailname string ${MAILNAME}" | debconf-set-selections
+  echo "postfix postfix/main_mailer_type string Internet Site" | debconf-set-selections
+  apt-get update
+  apt-get install -y postfix sasl2-bin libsasl2-modules ca-certificates openssl mailutils swaks python3
+}
+
+validate_certificate_pair() {
+  local cert="$1"
+  local key="$2"
+
+  [[ -f "$cert" ]] || return 1
+  [[ -f "$key" ]] || return 1
+  openssl x509 -in "$cert" -noout >/dev/null 2>&1 || return 1
+  openssl pkey -in "$key" -noout >/dev/null 2>&1 || return 1
+
+  local cert_pub=""
+  local key_pub=""
+  cert_pub="$(openssl x509 -in "$cert" -noout -pubkey 2>/dev/null | openssl pkey -pubin -outform DER 2>/dev/null | openssl dgst -sha256 -r | awk '{print $1}')"
+  key_pub="$(openssl pkey -in "$key" -pubout -outform DER 2>/dev/null | openssl dgst -sha256 -r | awk '{print $1}')"
+  [[ -n "$cert_pub" && "$cert_pub" == "$key_pub" ]]
+}
+
+set_letsencrypt_paths() {
+  CERT_FILE="/etc/letsencrypt/live/${CERT_DOMAIN}/fullchain.pem"
+  KEY_FILE="/etc/letsencrypt/live/${CERT_DOMAIN}/privkey.pem"
+}
+
+retry_or_fail() {
+  local message="$1"
+  warn "$message"
+  local again=""
+  again="$(read_default "是否重试？输入 y 重试，输入 n 退出" "y")"
+  [[ "$again" =~ ^[Yy]$ ]] || fail "$message"
+}
+
+configure_tls() {
+  log "配置并验证客户端到 Relay 的 STARTTLS 证书"
+  mkdir -p "$CERT_DIR"
+  chmod 700 "$CERT_DIR"
+
+  case "$TLS_MODE" in
+    1)
+      while true; do
+        openssl req -x509 -nodes -newkey rsa:4096 \
+          -days 3650 \
+          -keyout "$KEY_FILE" \
+          -out "$CERT_FILE" \
+          -subj "/CN=${MAILNAME}" >/dev/null 2>&1
+        chmod 600 "$KEY_FILE"
+        chmod 644 "$CERT_FILE"
+        if validate_certificate_pair "$CERT_FILE" "$KEY_FILE"; then
+          break
+        fi
+        retry_or_fail "自签证书生成后验证失败。"
+      done
+      ;;
+    2)
+      apt-get install -y certbot
+      while true; do
+        set_letsencrypt_paths
+        if certbot certonly --standalone \
+          --non-interactive \
+          --agree-tos \
+          --register-unsafely-without-email \
+          --preferred-challenges http \
+          -d "$CERT_DOMAIN"; then
+          if validate_certificate_pair "$CERT_FILE" "$KEY_FILE"; then
+            break
+          fi
+        fi
+        retry_or_fail "Let's Encrypt 证书申请或验证失败。请确认域名解析到本机，且 TCP 80 已放行。"
+      done
+      ;;
+    3)
+      while true; do
+        set_letsencrypt_paths
+        if validate_certificate_pair "$CERT_FILE" "$KEY_FILE"; then
+          break
+        fi
+        warn "未找到可用证书，或证书与私钥不匹配：${CERT_FILE} / ${KEY_FILE}"
+        CERT_DOMAIN="$(read_cert_domain "请重新输入已有 Let's Encrypt 证书的域名")"
+        MAILNAME="$CERT_DOMAIN"
+        CERT_SOURCE="已有 Let's Encrypt 证书：${CERT_DOMAIN}"
+      done
+      ;;
+    4)
+      while true; do
+        CERT_FILE="${CUSTOM_CERT_DIR}/fullchain.pem"
+        KEY_FILE="${CUSTOM_CERT_DIR}/privkey.pem"
+        if validate_certificate_pair "$CERT_FILE" "$KEY_FILE"; then
+          break
+        fi
+        warn "未找到可用证书，或证书与私钥不匹配：${CERT_FILE} / ${KEY_FILE}"
+        CUSTOM_CERT_DIR="$(read_required "请重新输入证书目录，目录内必须有 fullchain.pem 和 privkey.pem")"
+        CUSTOM_CERT_DIR="${CUSTOM_CERT_DIR%/}"
+        CERT_SOURCE="自定义证书目录：${CUSTOM_CERT_DIR}"
+      done
+      ;;
+  esac
+
+  chmod 644 "$CERT_FILE" || true
+  chmod 600 "$KEY_FILE" || true
+  log "证书验证通过：${CERT_FILE}"
+}
+
+configure_upstream_auth() {
+  log "写入 ${UPSTREAM_PROVIDER} 上游 SMTP 认证"
+  cat > /etc/postfix/sasl_passwd <<EOF_PASSWD
+[${UPSTREAM_HOST}]:${UPSTREAM_PORT} ${UPSTREAM_USER}:${UPSTREAM_PASS}
+EOF_PASSWD
+  chmod 600 /etc/postfix/sasl_passwd
+  postmap /etc/postfix/sasl_passwd
+  chmod 600 /etc/postfix/sasl_passwd.db
+}
+
+configure_relay_auth() {
+  log "创建强服务器连接本 Relay 使用的账号"
+  mkdir -p /etc/postfix/sasl
+  cat > /etc/postfix/sasl/smtpd.conf <<'EOF_SASL'
+pwcheck_method: auxprop
+auxprop_plugin: sasldb
+mech_list: PLAIN LOGIN
+EOF_SASL
+
+  echo "$RELAY_PASS" | saslpasswd2 -c -p -u "$MAILNAME" "$RELAY_USER"
+
+  if [[ -f /etc/sasldb2 ]]; then
+    chgrp postfix /etc/sasldb2 || true
+    chmod 640 /etc/sasldb2 || true
+  fi
+}
+
+configure_postfix_main() {
+  log "写入 Postfix 主配置"
+  echo "$MAILNAME" > /etc/mailname
+
+  postconf -e "myhostname = ${MAILNAME}"
+  postconf -e "myorigin = /etc/mailname"
+  postconf -e "inet_interfaces = all"
+  postconf -e "inet_protocols = ipv4"
+  postconf -e "mydestination = localhost"
+  postconf -e "mynetworks = 127.0.0.0/8"
+
+  postconf -e "relayhost = [${UPSTREAM_HOST}]:${UPSTREAM_PORT}"
+  postconf -e "smtp_sasl_auth_enable = yes"
+  postconf -e "smtp_sasl_password_maps = hash:/etc/postfix/sasl_passwd"
+  postconf -e "smtp_sasl_security_options = noanonymous"
+  postconf -e "smtp_sasl_tls_security_options = noanonymous"
+  postconf -e "smtp_tls_security_level = encrypt"
+  postconf -e "smtp_tls_CAfile = /etc/ssl/certs/ca-certificates.crt"
+  postconf -e "smtp_tls_loglevel = 1"
+  if [[ "$UPSTREAM_TLS_MODE" == "ssl" ]]; then
+    postconf -e "smtp_tls_wrappermode = yes"
+  else
+    postconf -e "smtp_tls_wrappermode = no"
+  fi
+
+  postconf -e "smtpd_tls_cert_file = ${CERT_FILE}"
+  postconf -e "smtpd_tls_key_file = ${KEY_FILE}"
+  postconf -e "smtpd_tls_security_level = encrypt"
+  postconf -e "smtpd_tls_auth_only = yes"
+  postconf -e "smtpd_tls_loglevel = 1"
+
+  postconf -e "smtpd_sasl_auth_enable = yes"
+  postconf -e "smtpd_sasl_type = cyrus"
+  postconf -e "smtpd_sasl_path = smtpd"
+  postconf -e "smtpd_sasl_local_domain = ${MAILNAME}"
+  postconf -e "smtpd_sasl_security_options = noanonymous"
+
+  postconf -e "smtpd_recipient_restrictions = reject_unauth_destination"
+  postconf -e "smtpd_relay_restrictions = permit_sasl_authenticated, reject_unauth_destination"
+
+  postconf -e "smtpd_client_connection_rate_limit = ${CONNECTION_RATE_LIMIT}"
+  postconf -e "default_destination_rate_delay = ${DESTINATION_RATE_DELAY}"
+}
+
+configure_postfix_master() {
+  log "配置自定义 SMTP Relay 监听端口 ${RELAY_PORT}"
+  remove_managed_block /etc/postfix/master.cf
+
+  cat >> /etc/postfix/master.cf <<EOF_MASTER
+
+${MANAGED_BEGIN}
+${RELAY_PORT} inet n       -       n       -       -       smtpd
+  -o syslog_name=postfix/relay-${RELAY_PORT}
+  -o smtpd_tls_security_level=encrypt
+  -o smtpd_tls_auth_only=yes
+  -o smtpd_sasl_auth_enable=yes
+  -o smtpd_client_restrictions=permit_mynetworks,reject
+  -o mynetworks=127.0.0.0/8,${ALLOW_CIDRS}
+  -o smtpd_relay_restrictions=permit_sasl_authenticated,reject
+  -o smtpd_recipient_restrictions=reject_unauth_destination
+${MANAGED_END}
+EOF_MASTER
+}
+
+configure_firewall() {
+  if command -v ufw >/dev/null 2>&1; then
+    log "检测到 ufw，添加来源 IP 限制规则"
+    IFS=',' read -ra cidrs <<< "$ALLOW_CIDRS"
+    for cidr in "${cidrs[@]}"; do
+      cidr="$(trim "$cidr")"
+      [[ -z "$cidr" ]] && continue
+      ufw allow from "$cidr" to any port "$RELAY_PORT" proto tcp || true
+    done
+    warn "如果 ufw 尚未启用，脚本不会自动启用它，避免误锁 SSH。需要时请先放行 SSH 再执行 ufw enable。"
+  else
+    warn "未检测到 ufw。请在云厂商安全组/iptables/nftables 中只允许 ${ALLOW_CIDRS} 访问 TCP ${RELAY_PORT}。"
+  fi
+}
+
+restart_postfix() {
+  log "重启 Postfix"
+  if command -v systemctl >/dev/null 2>&1; then
+    systemctl enable postfix
+    systemctl restart postfix
+  elif command -v service >/dev/null 2>&1; then
+    service postfix restart
+  else
+    warn "未找到 systemctl/service，已完成配置但未自动重启 Postfix。请手动重启 Postfix。"
+  fi
+}
+
+print_summary() {
+  cat <<EOF_SUMMARY
+
+============================================================
+安装完成
+============================================================
+
+强服务器项目中填写：
+  SMTP_HOST      = 弱服务器 IP 或 DNS only/灰云域名
+  SMTP_PORT      = ${RELAY_PORT}
+  SMTP_USER      = ${RELAY_USER}
+  SMTP_PASS      = 你刚才设置的 Relay 密码
+  加密方式       = STARTTLS
+  Nodemailer     = secure: false, requireTLS: true
+
+上游 SMTP：
+  服务商：${UPSTREAM_PROVIDER}
+  地址：${UPSTREAM_HOST}:${UPSTREAM_PORT}
+  加密：${UPSTREAM_TLS_MODE}
+  用户：${UPSTREAM_USER}
+
+客户端到 Relay 的证书：
+  来源：${CERT_SOURCE}
+  证书：${CERT_FILE}
+  私钥：${KEY_FILE}
+
+重要安全提醒：
+  1. Cloudflare 普通小黄云不能直接代理 SMTP/TCP，请用灰云 DNS only。
+  2. 云厂商安全组也要只允许强服务器 IP 访问 TCP ${RELAY_PORT}。
+  3. 上游 SMTP 密码/API Key 保存在 /etc/postfix/sasl_passwd，仅 root 可读。
+  4. 如果使用自签证书，客户端需要允许该证书，或关闭严格证书校验；生产建议使用正式证书。
+
+查看状态：
+  systemctl status postfix --no-pager
+
+查看日志：
+  journalctl -u postfix -f
+  tail -f /var/log/mail.log
+
+测试命令示例：
+  swaks --to recipient@example.com --from ${UPSTREAM_USER} \\
+    --server <弱服务器IP> --port ${RELAY_PORT} \\
+    --auth LOGIN --auth-user ${RELAY_USER} --auth-password '<Relay密码>' --tls
+
+EOF_SUMMARY
+}
+
+main() {
+  need_root
+  need_debian_like
+
+  cat <<'EOF_BANNER'
+============================================================
+通用 SMTP Relay 交互式安装器
+============================================================
+此脚本会把当前弱服务器配置为一个需要认证和 STARTTLS 的 SMTP Relay。
+强服务器连接本 Relay，本 Relay 再登录你选择的上游 SMTP 服务商发信。
+EOF_BANNER
+
+  RELAY_PORT="$(read_default "Relay 对强服务器监听的端口" "2525")"
+  validate_port "$RELAY_PORT"
+
+  ALLOW_RAW="$(read_required "允许访问本 Relay 的强服务器公网 IP/CIDR，多个用逗号分隔，例如 203.0.113.10/32")"
+  ALLOW_CIDRS="$(normalize_cidrs "$ALLOW_RAW")"
+  [[ -n "$ALLOW_CIDRS" ]] || fail "允许来源不能为空。"
+
+  select_provider
+
+  UPSTREAM_USER="$(read_required "$UPSTREAM_USER_HINT")"
+  UPSTREAM_PASS="$(read_secret_required "$UPSTREAM_PASSWORD_HINT")"
+
+  RELAY_USER="relay"
+  RELAY_PASS="$(confirm_secret "强服务器连接本 Relay 的密码")"
+
+  select_tls_mode
+
+  CONNECTION_RATE_LIMIT="30"
+  DESTINATION_RATE_DELAY="1s"
+
+  cat <<EOF_CONFIRM
+
+即将配置：
+  Relay 监听端口: ${RELAY_PORT}
+  允许来源: ${ALLOW_CIDRS}
+  Relay 用户: ${RELAY_USER}
+  上游服务商: ${UPSTREAM_PROVIDER}
+  上游 SMTP: ${UPSTREAM_HOST}:${UPSTREAM_PORT}
+  上游加密: ${UPSTREAM_TLS_MODE}
+  上游用户: ${UPSTREAM_USER}
+  证书来源: ${CERT_SOURCE}
+  mailname: ${MAILNAME}
+
+EOF_CONFIRM
+
+  CONFIRM="$(read_default "确认继续？输入 yes 继续" "no")"
+  [[ "$CONFIRM" == "yes" ]] || fail "已取消。"
+
+  TS="$(date +%Y%m%d-%H%M%S)"
+
+  install_packages
+
+  log "备份 Postfix 配置"
+  backup_file /etc/postfix/main.cf "$TS"
+  backup_file /etc/postfix/master.cf "$TS"
+
+  configure_tls
+  configure_upstream_auth
+  configure_relay_auth
+  configure_postfix_main
+  configure_postfix_master
+  configure_firewall
+
+  log "检查 Postfix 配置"
+  postfix check
+
+  restart_postfix
+  print_summary
+}
+
+main "$@"
