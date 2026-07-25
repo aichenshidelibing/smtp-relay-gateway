@@ -96,7 +96,7 @@ DNS only / 灰云
 - Ubuntu 20.04+ / Debian 11+；
 - root 权限；
 - 能访问你选择的上游 SMTP 地址和端口；
-- 云厂商安全组允许应用服务器访问你设置的 中继服务端口，例如 `2525`。
+- 云厂商安全组允许应用服务器访问你设置的中继服务端口，例如 `2525`。
 
 ## 快速部署
 
@@ -132,59 +132,491 @@ sudo bash scripts/install-smtp-relay.sh
 - Let's Encrypt 申请不要求填写邮箱；
 - 基础限流参数使用安全默认值。
 
-## 各服务商凭据提示
+## 各服务商凭据获取教程
+
+> 说明：各服务商后台界面会调整，下面步骤按常见路径整理。若页面名称略有不同，以服务商当前后台为准。所有密码、授权码、API Key 都只在部署脚本中输入一次，脚本会写入中继服务器的 `/etc/postfix/sasl_passwd`，不要提交到代码仓库。
 
 ### Gmail / Google Workspace
 
-- SMTP：`smtp.gmail.com:587`；
-- 建议开启两步验证后创建 App Password；
-- Google Workspace 可能需要管理员允许 SMTP/应用密码相关策略。
+适合个人 Gmail、Google Workspace 企业邮箱。
 
-### Outlook / Hotmail
+SMTP 配置：
 
-- SMTP：`smtp-mail.outlook.com:587`；
-- 使用账号密码或 App Password；
-- 如果启用 MFA，通常需要 App Password。
+```text
+SMTP Host: smtp.gmail.com
+SMTP Port: 587
+Encryption: STARTTLS
+Username: 完整 Gmail / Workspace 邮箱地址
+Password: App Password
+```
+
+获取 App Password：
+
+1. 登录 Google 账号。
+2. 打开 Google Account：<https://myaccount.google.com/>
+3. 进入 **Security / 安全性**。
+4. 开启 **2-Step Verification / 两步验证**。
+5. 开启后，在安全性页面搜索或进入 **App passwords / 应用专用密码**。
+6. 创建一个新的 App Password，名称可以写：
+
+   ```text
+   smtp-relay-gateway
+   ```
+
+7. 复制生成的 16 位应用专用密码。
+8. 运行本项目安装脚本时：
+   - 服务商选择 `Gmail / Google Workspace`；
+   - 用户名填写完整邮箱；
+   - 密码填写刚生成的 App Password。
+
+注意事项：
+
+- 不要填写网页登录密码，优先使用 App Password。
+- 如果是 Google Workspace，管理员可能禁用了 App Password 或 SMTP 相关能力，需要管理员在 Workspace Admin Console 放行。
+- `From` 建议使用登录邮箱，或使用 Google Workspace 已授权的别名。
+- Gmail 有每日发送额度，个人 Gmail 不适合大量业务邮件。
+
+### Outlook / Hotmail 个人邮箱
+
+适合 `@outlook.com`、`@hotmail.com`、`@live.com` 等个人邮箱。
+
+SMTP 配置：
+
+```text
+SMTP Host: smtp-mail.outlook.com
+SMTP Port: 587
+Encryption: STARTTLS
+Username: 完整 Outlook/Hotmail 邮箱地址
+Password: 账号密码或 App Password
+```
+
+获取凭据：
+
+1. 登录 Microsoft Account：<https://account.microsoft.com/>
+2. 进入 **Security / 安全性**。
+3. 如果账号开启了双重验证，进入高级安全选项，创建 **App password / 应用密码**。
+4. 运行安装脚本时：
+   - 服务商选择 `Outlook / Hotmail 个人邮箱`；
+   - 用户名填写完整邮箱；
+   - 密码填写 App Password 或账号密码。
+
+注意事项：
+
+- 如果开启了 MFA，通常需要 App Password。
+- 部分个人 Outlook 账号可能限制 SMTP AUTH 或触发安全风控。
+- `From` 建议使用登录邮箱，不要伪造成其他域名。
 
 ### Microsoft 365 / Office 365
 
-- SMTP：`smtp.office365.com:587`；
-- 经常需要为具体邮箱启用 SMTP AUTH；
-- `From` 通常要与登录邮箱一致，或者账号具备 Send As 权限。
+适合企业 Microsoft 365 邮箱。
+
+SMTP 配置：
+
+```text
+SMTP Host: smtp.office365.com
+SMTP Port: 587
+Encryption: STARTTLS
+Username: 完整 Microsoft 365 邮箱地址
+Password: 邮箱密码或 App Password
+```
+
+获取和启用 SMTP AUTH：
+
+1. 确认你有 Microsoft 365 管理员权限，或者让管理员操作。
+2. 登录 Microsoft 365 Admin Center：<https://admin.microsoft.com/>
+3. 找到对应用户邮箱。
+4. 检查该邮箱是否允许 **Authenticated SMTP / SMTP AUTH**。
+5. 如果租户或邮箱禁用了 SMTP AUTH，需要启用后再使用。
+6. 如果账号开启 MFA，需要使用 App Password，或者改用支持的认证方式/专用发信账号。
+7. 运行安装脚本时：
+   - 服务商选择 `Microsoft 365 / Office 365`；
+   - 用户名填写完整邮箱；
+   - 密码填写邮箱密码或 App Password。
+
+常见 PowerShell 检查思路：
+
+```powershell
+Get-CASMailbox user@example.com | Select SmtpClientAuthenticationDisabled
+```
+
+启用单个邮箱 SMTP AUTH 的常见思路：
+
+```powershell
+Set-CASMailbox user@example.com -SmtpClientAuthenticationDisabled $false
+```
+
+注意事项：
+
+- 租户级别也可能禁用 SMTP AUTH。
+- `From` 必须是登录邮箱，或者该邮箱拥有对应地址的 Send As / Send on behalf 权限。
+- 若遇到 `SmtpClientAuthentication is disabled`，优先检查 SMTP AUTH。
+- 若遇到 `SendAsDenied`，检查发件地址权限。
+
+### Yahoo Mail
+
+SMTP 配置：
+
+```text
+SMTP Host: smtp.mail.yahoo.com
+SMTP Port: 587
+Encryption: STARTTLS
+Username: 完整 Yahoo 邮箱地址
+Password: App Password
+```
+
+获取 App Password：
+
+1. 登录 Yahoo Account Security 页面。
+2. 开启两步验证。
+3. 找到 **Generate app password / 生成应用密码**。
+4. 创建应用密码，名称可以写：
+
+   ```text
+   smtp-relay-gateway
+   ```
+
+5. 运行安装脚本时：
+   - 服务商选择 `Yahoo Mail`；
+   - 用户名填写完整 Yahoo 邮箱；
+   - 密码填写 App Password。
+
+注意事项：
+
+- Yahoo 通常要求 App Password，不建议使用网页登录密码。
+- `From` 建议使用登录邮箱。
+
+### Zoho Mail
+
+SMTP 配置：
+
+```text
+SMTP Host: smtp.zoho.com
+SMTP Port: 587
+Encryption: STARTTLS
+Username: 完整 Zoho 邮箱地址
+Password: 账号密码或 App Password
+```
+
+获取凭据：
+
+1. 登录 Zoho Mail / Zoho Accounts。
+2. 如果账号开启 MFA，进入安全设置创建 **App Password**。
+3. 如果是组织邮箱，确认管理员允许 SMTP/IMAP 访问。
+4. 运行安装脚本时：
+   - 服务商选择 `Zoho Mail`；
+   - 用户名填写完整 Zoho 邮箱；
+   - 密码填写 App Password 或账号密码。
+
+注意事项：
+
+- Zoho 有不同区域节点，部分账号可能需要使用区域 SMTP，例如 `.eu`、`.in` 等。若默认 `smtp.zoho.com` 不适用，使用安装脚本的 `自定义 SMTP`。
+- `From` 使用 Zoho 已验证或允许的发件地址。
 
 ### Amazon SES
 
-- SMTP：`email-smtp.<region>.amazonaws.com:587`；
-- 用户名/密码不是 AWS Access Key，而是 SES 后台生成的 SMTP Credentials；
-- SES sandbox 状态下只能发给验证过的地址。
+适合生产业务发信，推荐用于较大规模邮件。
+
+SMTP 配置：
+
+```text
+SMTP Host: email-smtp.<region>.amazonaws.com
+SMTP Port: 587
+Encryption: STARTTLS
+Username: SES SMTP Username
+Password: SES SMTP Password
+```
+
+获取 SES SMTP Credentials：
+
+1. 登录 AWS Console。
+2. 进入 **Amazon SES**。
+3. 选择你要发信的 Region，例如：
+
+   ```text
+   us-east-1
+   ap-southeast-1
+   eu-west-1
+   ```
+
+4. 在 SES 中验证发件身份：
+   - 验证域名；或
+   - 验证单个邮箱。
+5. 配置域名 DNS：SPF/DKIM/DMARC，尤其是 DKIM。
+6. 进入 SES 的 **SMTP settings / SMTP 设置**。
+7. 点击 **Create SMTP credentials / 创建 SMTP 凭据**。
+8. 保存生成的：
+   - SMTP Username；
+   - SMTP Password。
+9. 运行安装脚本时：
+   - 服务商选择 `Amazon SES`；
+   - 输入 SES Region；
+   - 用户名填写 SES SMTP Username；
+   - 密码填写 SES SMTP Password。
+
+注意事项：
+
+- SES SMTP 凭据不是 AWS Access Key，也不是 IAM Secret Access Key。
+- SES sandbox 状态下，只能发给已验证的收件地址。
+- 生产使用前需要申请移出 sandbox。
+- `From` 必须是 SES 已验证的域名或邮箱。
 
 ### SendGrid
 
-- SMTP：`smtp.sendgrid.net:587`；
-- 用户名通常填 `apikey`；
-- 密码填 SendGrid API Key。
+SMTP 配置：
+
+```text
+SMTP Host: smtp.sendgrid.net
+SMTP Port: 587
+Encryption: STARTTLS
+Username: apikey
+Password: SendGrid API Key
+```
+
+获取 API Key：
+
+1. 登录 SendGrid 控制台。
+2. 进入 **Settings** → **API Keys**。
+3. 点击 **Create API Key**。
+4. 权限建议选择最小可用权限。通常只发信可选择 Mail Send 权限。
+5. 创建后复制 API Key。
+6. 运行安装脚本时：
+   - 服务商选择 `SendGrid`；
+   - 用户名填写固定值：
+
+     ```text
+     apikey
+     ```
+
+   - 密码填写 SendGrid API Key。
+
+注意事项：
+
+- SendGrid 的 SMTP 用户名通常不是你的邮箱，而是固定 `apikey`。
+- 需要先完成 Sender Authentication / Domain Authentication。
+- `From` 必须是已验证 sender 或已认证域名下的地址。
 
 ### Mailgun
 
-- SMTP：`smtp.mailgun.org:587`；
-- 用户名通常类似 `postmaster@mg.example.com`；
-- 密码使用 Mailgun SMTP Password。
+SMTP 配置：
+
+```text
+SMTP Host: smtp.mailgun.org
+SMTP Port: 587
+Encryption: STARTTLS
+Username: Mailgun SMTP Login
+Password: Mailgun SMTP Password
+```
+
+获取 SMTP 凭据：
+
+1. 登录 Mailgun 控制台。
+2. 添加并验证发信域名，例如：
+
+   ```text
+   mg.example.com
+   ```
+
+3. 按 Mailgun 提示配置 DNS，包括 SPF、DKIM、CNAME/MX 等。
+4. 进入对应 Domain 的 **SMTP credentials / SMTP 凭据** 页面。
+5. 获取或创建 SMTP 用户，常见格式：
+
+   ```text
+   postmaster@mg.example.com
+   ```
+
+6. 设置或复制 SMTP Password。
+7. 运行安装脚本时：
+   - 服务商选择 `Mailgun`；
+   - 用户名填写 SMTP Login；
+   - 密码填写 SMTP Password。
+
+注意事项：
+
+- EU 区域账号可能需要不同 SMTP Host。若默认 `smtp.mailgun.org` 不适用，使用 `自定义 SMTP`。
+- `From` 使用 Mailgun 已验证域名下的地址。
 
 ### Postmark
 
-- SMTP：`smtp.postmarkapp.com:587`；
-- 用户名和密码通常都填 Server API Token。
+SMTP 配置：
+
+```text
+SMTP Host: smtp.postmarkapp.com
+SMTP Port: 587
+Encryption: STARTTLS
+Username: Server API Token
+Password: Server API Token
+```
+
+获取 Server API Token：
+
+1. 登录 Postmark。
+2. 创建或进入一个 Server。
+3. 进入 Server 的 **API Tokens** 或 **Credentials** 页面。
+4. 复制 **Server API Token**。
+5. 确认 Sender Signature 或 Domain 已验证。
+6. 运行安装脚本时：
+   - 服务商选择 `Postmark`；
+   - 用户名填写 Server API Token；
+   - 密码也填写 Server API Token。
+
+注意事项：
+
+- Postmark SMTP 的用户名和密码通常都填 Server API Token。
+- `From` 必须是已验证 Sender Signature 或已认证域名地址。
 
 ### Resend
 
-- SMTP：`smtp.resend.com:587`；
-- 用户名通常填 `resend`；
-- 密码填 Resend API Key。
+SMTP 配置：
 
-### QQ / 163 邮箱
+```text
+SMTP Host: smtp.resend.com
+SMTP Port: 587
+Encryption: STARTTLS
+Username: resend
+Password: Resend API Key
+```
 
-- 常用 `465 SSL/TLS`；
-- 密码请使用邮箱后台生成的客户端授权码，不是网页登录密码。
+获取 API Key：
+
+1. 登录 Resend 控制台。
+2. 添加并验证发信域名。
+3. 按 Resend 提示配置 DNS，包括 SPF/DKIM。
+4. 进入 **API Keys**。
+5. 创建新的 API Key。
+6. 运行安装脚本时：
+   - 服务商选择 `Resend`；
+   - 用户名通常填写：
+
+     ```text
+     resend
+     ```
+
+   - 密码填写 Resend API Key。
+
+注意事项：
+
+- `From` 必须使用 Resend 已验证域名下的地址。
+- 如果 Resend 后台给出不同用户名，以后台显示为准。
+
+### Mailtrap
+
+适合开发测试，也可以使用 Mailtrap Email Sending 做正式发信。
+
+SMTP 配置：
+
+```text
+SMTP Host: live.smtp.mailtrap.io
+SMTP Port: 587
+Encryption: STARTTLS
+Username: Mailtrap SMTP Username
+Password: Mailtrap SMTP Password / Token
+```
+
+获取 SMTP 凭据：
+
+1. 登录 Mailtrap。
+2. 如果是测试收件箱，进入对应 Inbox 的 SMTP Settings。
+3. 如果是正式 Email Sending，进入 Sending Domains 并验证域名。
+4. 在 Mailtrap 提供的 SMTP 配置中复制：
+   - Host；
+   - Port；
+   - Username；
+   - Password。
+5. 运行安装脚本时：
+   - 服务商选择 `Mailtrap`；
+   - 用户名填写 Mailtrap 提供的 SMTP Username；
+   - 密码填写 Mailtrap 提供的 SMTP Password / Token。
+
+注意事项：
+
+- 测试 Inbox 的邮件不会真正投递到收件人邮箱，适合开发测试。
+- 正式发信需要使用 Email Sending 并完成域名验证。
+- 如果 Mailtrap 后台给的 Host 不是 `live.smtp.mailtrap.io`，使用 `自定义 SMTP`。
+
+### QQ 邮箱
+
+SMTP 配置：
+
+```text
+SMTP Host: smtp.qq.com
+SMTP Port: 465
+Encryption: SSL/TLS
+Username: 完整 QQ 邮箱地址
+Password: SMTP 授权码
+```
+
+获取授权码：
+
+1. 登录 QQ 邮箱网页版。
+2. 进入 **设置**。
+3. 找到 **账户** 或 **POP3/IMAP/SMTP/Exchange/CardDAV/CalDAV 服务**。
+4. 开启 SMTP 相关服务，通常是：
+   - POP3/SMTP；或
+   - IMAP/SMTP。
+5. 按页面提示完成短信/安全验证。
+6. 生成并复制 **授权码**。
+7. 运行安装脚本时：
+   - 服务商选择 `QQ 邮箱`；
+   - 用户名填写完整 QQ 邮箱；
+   - 密码填写授权码，不是 QQ 登录密码。
+
+注意事项：
+
+- QQ 邮箱通常使用授权码，不使用 QQ 密码。
+- 本项目预设使用 `465 SSL/TLS`，脚本会自动配置 `smtp_tls_wrappermode = yes`。
+
+### 163 / 网易邮箱
+
+SMTP 配置：
+
+```text
+SMTP Host: smtp.163.com
+SMTP Port: 465
+Encryption: SSL/TLS
+Username: 完整 163 邮箱地址
+Password: 客户端授权码
+```
+
+获取客户端授权码：
+
+1. 登录 163 / 网易邮箱网页版。
+2. 进入 **设置**。
+3. 找到 **POP3/SMTP/IMAP** 或 **客户端授权密码**。
+4. 开启 SMTP/IMAP/POP3 相关服务。
+5. 按页面提示完成手机验证。
+6. 创建并复制 **客户端授权码**。
+7. 运行安装脚本时：
+   - 服务商选择 `163/网易邮箱`；
+   - 用户名填写完整 163 邮箱；
+   - 密码填写客户端授权码，不是网页登录密码。
+
+注意事项：
+
+- 网易邮箱通常要求客户端授权码。
+- 本项目预设使用 `465 SSL/TLS`。
+- 如果你使用的是企业网易邮箱或其他网易域名邮箱，SMTP Host 可能不同，请用 `自定义 SMTP`。
+
+### 自定义 SMTP
+
+如果你的服务商不在预设里，或者服务商后台给出了不同 SMTP 地址，选择 `自定义 SMTP`。
+
+你需要准备：
+
+```text
+SMTP Host
+SMTP Port
+加密方式：STARTTLS 或 SSL/TLS wrapper
+SMTP Username
+SMTP Password / Token / API Key
+允许使用的 From 地址
+```
+
+选择建议：
+
+- 端口 `587` 通常选择 `STARTTLS`；
+- 端口 `465` 通常选择 `SSL/TLS wrapper`；
+- 端口 `25` 不建议用于客户端提交，且很多云服务器会阻断；
+- 如果服务商要求固定发件人，业务项目中的 `From` 必须按服务商要求填写。
 
 ## TLS 证书
 
