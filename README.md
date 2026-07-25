@@ -1,22 +1,22 @@
 # 通用 SMTP Relay 一键部署
 
-这个项目用于在一台**可以访问上游 SMTP 的弱服务器**上部署 SMTP Relay。部署完成后，强服务器上的业务项目只需要连接弱服务器的 `IP:端口`，就可以通过 Gmail、Outlook、Microsoft 365、Amazon SES、SendGrid、Mailgun、Postmark、Resend 等主流 SMTP 服务发信。
+这个项目用于在一台**可以访问上游 SMTP 的中继服务器**上部署 SMTP Relay。部署完成后，应用服务器上的业务项目只需要连接中继服务器的 `IP:端口`，就可以通过 Gmail、Outlook、Microsoft 365、Amazon SES、SendGrid、Mailgun、Postmark、Resend 等主流 SMTP 服务发信。
 
 ```text
-强服务器项目
+应用服务器项目
   ↓ SMTP + STARTTLS + Relay 用户名密码
-弱服务器 Postfix SMTP Relay
+中继服务器 Postfix SMTP Relay
   ↓ SMTP + STARTTLS 或 SSL/TLS + 上游 SMTP 账号/API Key
 Gmail / Outlook / Microsoft 365 / SES / SendGrid / Mailgun / ...
 ```
 
 ## 适用场景
 
-- 强服务器性能更好，但 25/465/587 等 SMTP 出站被阻断；
-- 弱服务器可以正常访问上游 SMTP；
+- 应用服务器所在网络无法直接访问 25/465/587 等 SMTP 出站端口；
+- 中继服务器可以正常访问上游 SMTP；
 - 业务项目只能配置 SMTP，不方便改成 HTTP 邮件 API；
 - 需要传输加密，避免明文 SMTP；
-- 需要避免开放中继，只有指定强服务器能用。
+- 需要避免开放中继，只有指定应用服务器能用。
 
 ## 支持的上游 SMTP 预设
 
@@ -59,7 +59,7 @@ smtp-relay.example.com:2525
 DNS only / 灰云
 ```
 
-不要开启普通代理小黄云。除非你使用 Cloudflare Spectrum，或者强服务器侧也运行 `cloudflared` 做 TCP 转发。
+不要开启普通代理小黄云。除非你使用 Cloudflare Spectrum，或者应用服务器侧也运行 `cloudflared` 做 TCP 转发。
 
 ### 两类密码
 
@@ -67,7 +67,7 @@ DNS only / 灰云
 
 1. **上游 SMTP 密码 / 授权码 / API Key**
 
-   弱服务器需要用它登录上游 SMTP。这个凭据会保存在弱服务器：
+   中继服务器需要用它登录上游 SMTP。这个凭据会保存在中继服务器：
 
    ```text
    /etc/postfix/sasl_passwd
@@ -78,7 +78,7 @@ DNS only / 灰云
 
 2. **Relay 密码**
 
-   强服务器上的项目连接弱服务器 Relay 时使用。
+   应用服务器上的项目连接中继服务器时使用。
 
    业务项目里填写的是这个密码，不是上游 SMTP 密码。
 
@@ -91,16 +91,16 @@ DNS only / 灰云
 
 ## 系统要求
 
-弱服务器需要是：
+中继服务器需要是：
 
 - Ubuntu 20.04+ / Debian 11+；
 - root 权限；
 - 能访问你选择的上游 SMTP 地址和端口；
-- 云厂商安全组允许强服务器访问你设置的 Relay 端口，例如 `2525`。
+- 云厂商安全组允许应用服务器访问你设置的 中继服务端口，例如 `2525`。
 
 ## 快速部署
 
-在弱服务器上执行：
+在中继服务器上执行：
 
 ```bash
 git clone <你的仓库地址> smtp-relay-gateway
@@ -117,17 +117,17 @@ sudo bash scripts/install-smtp-relay.sh
 
 脚本会交互式询问：
 
-- Relay 对强服务器监听的端口，默认 `2525`；
-- 允许访问 Relay 的强服务器公网 IP/CIDR；
+- 中继服务对应用服务器开放的端口，默认 `2525`；
+- 允许访问中继服务的应用服务器公网 IP/CIDR；
 - 上游 SMTP 服务商；
 - 上游 SMTP 用户名；
 - 上游 SMTP 密码、授权码、App Password 或 API Key；
-- 强服务器连接 Relay 用的密码；
+- 应用服务器连接中继服务用的密码；
 - TLS 证书方式。
 
 脚本会自动处理这些值，不再要求手动填写：
 
-- Relay 用户名固定为 `relay`；
+- 中继服务用户名固定为 `relay`；
 - `mailname` / hostname 自动选择；
 - Let's Encrypt 申请不要求填写邮箱；
 - 基础限流参数使用安全默认值。
@@ -188,7 +188,7 @@ sudo bash scripts/install-smtp-relay.sh
 
 ## TLS 证书
 
-脚本支持四种客户端到 Relay 的 TLS 证书方式：
+脚本支持四种客户端到中继服务的 TLS 证书方式：
 
 1. **自动生成自签证书**
 
@@ -198,7 +198,7 @@ sudo bash scripts/install-smtp-relay.sh
 
    中文提示会说明前置条件：
 
-   - Relay 域名必须已经解析到这台弱服务器；
+   - 中继服务域名必须已经解析到这台中继服务器；
    - 云厂商安全组和系统防火墙需要临时放行 TCP `80`；
    - 普通 Cloudflare 小黄云要关闭，使用 DNS only / 灰云；
    - 脚本会使用 `certbot standalone` 自动申请；
@@ -232,15 +232,15 @@ sudo bash scripts/install-smtp-relay.sh
 
 验证失败会提示重试，不会直接写入错误证书路径。
 
-## 强服务器项目配置
+## 应用服务器项目配置
 
-部署完成后，强服务器上的项目填写：
+部署完成后，应用服务器上的项目填写：
 
 ```env
-SMTP_HOST=弱服务器IP或灰云域名
+SMTP_HOST=中继服务器IP或灰云域名
 SMTP_PORT=2525
 SMTP_USER=relay
-SMTP_PASS=你部署时设置的Relay密码
+SMTP_PASS=你部署时设置的中继服务密码
 SMTP_SECURE=false
 SMTP_STARTTLS=true
 ```
@@ -257,13 +257,13 @@ SMTP_STARTTLS=true
 import nodemailer from "nodemailer";
 
 const transporter = nodemailer.createTransport({
-  host: "弱服务器IP或灰云域名",
+  host: "中继服务器IP或灰云域名",
   port: 2525,
   secure: false,
   requireTLS: true,
   auth: {
     user: "relay",
-    pass: "你部署时设置的Relay密码",
+    pass: "你部署时设置的中继服务密码",
   },
   // 如果你使用自签证书且客户端严格校验，可能需要临时设置：
   // tls: { rejectUnauthorized: false },
@@ -273,7 +273,7 @@ await transporter.sendMail({
   from: "你的上游SMTP允许的发件地址@example.com",
   to: "recipient@example.com",
   subject: "SMTP Relay 测试",
-  text: "这是一封通过弱服务器 SMTP Relay 发出的测试邮件。",
+  text: "这是一封通过 SMTP 中继服务器发出的测试邮件。",
 });
 ```
 
@@ -281,10 +281,10 @@ await transporter.sendMail({
 
 ```env
 MAIL_MAILER=smtp
-MAIL_HOST=弱服务器IP或灰云域名
+MAIL_HOST=中继服务器IP或灰云域名
 MAIL_PORT=2525
 MAIL_USERNAME=relay
-MAIL_PASSWORD=你部署时设置的Relay密码
+MAIL_PASSWORD=你部署时设置的中继服务密码
 MAIL_ENCRYPTION=tls
 MAIL_FROM_ADDRESS=你的上游SMTP允许的发件地址@example.com
 MAIL_FROM_NAME="App"
@@ -296,16 +296,16 @@ MAIL_FROM_NAME="App"
 
 ## 测试
 
-弱服务器安装脚本会安装 `swaks`。你可以在强服务器或任意允许来源机器上测试：
+中继服务器安装脚本会安装 `swaks`。你可以在应用服务器或任意允许来源机器上测试：
 
 ```bash
 swaks --to recipient@example.com \
   --from 你的上游SMTP允许的发件地址@example.com \
-  --server 弱服务器IP或灰云域名 \
+  --server 中继服务器IP或灰云域名 \
   --port 2525 \
   --auth LOGIN \
   --auth-user relay \
-  --auth-password '你部署时设置的Relay密码' \
+  --auth-password '你部署时设置的中继服务密码' \
   --tls
 ```
 
@@ -321,7 +321,7 @@ swaks --to recipient@example.com \
 你还需要在云厂商安全组中放行：
 
 ```text
-来源：强服务器公网 IP
+来源：应用服务器公网 IP
 协议：TCP
 端口：2525 或你部署时填写的端口
 ```
@@ -331,7 +331,7 @@ swaks --to recipient@example.com \
 如果手动使用 ufw：
 
 ```bash
-sudo ufw allow from <强服务器IP> to any port 2525 proto tcp
+sudo ufw allow from <应用服务器IP> to any port 2525 proto tcp
 ```
 
 启用 ufw 前务必确认 SSH 端口已放行：
@@ -401,10 +401,10 @@ Microsoft 365 通常要求 `From` 与 SMTP 登录账号一致，或者登录账�
 
 检查：
 
-- 云厂商安全组是否放行 Relay 端口；
-- 弱服务器系统防火墙是否放行；
-- 安装时填写的强服务器 IP 是否正确；
-- 强服务器是否真的从该公网 IP 出口访问；
+- 云厂商安全组是否放行中继服务端口；
+- 中继服务器系统防火墙是否放行；
+- 安装时填写的应用服务器 IP 是否正确；
+- 应用服务器是否真的从该公网 IP 出口访问；
 - Postfix 是否正在监听端口：
 
 ```bash
@@ -486,7 +486,7 @@ smtp-relay-gateway/
 ## 生产建议
 
 - 使用灰云域名 + 正式证书；
-- 只允许强服务器 IP 访问 Relay 端口；
+- 只允许应用服务器 IP 访问中继服务端口；
 - 使用专门的发信账号或 SMTP 专用凭据；
 - 邮箱类服务尽量开启 MFA，并使用 App Password/授权码；
 - 设置业务侧限流；

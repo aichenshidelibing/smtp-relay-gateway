@@ -18,7 +18,7 @@ await transporter.sendMail({
   from: process.env.MAIL_FROM_ADDRESS,
   to: process.env.TEST_TO,
   subject: "SMTP Relay 测试",
-  text: "这是一封通过弱服务器 SMTP Relay 发出的测试邮件。",
+  text: "这是一封通过 SMTP 中继服务器发出的测试邮件。",
 });
 
 console.log("sent");

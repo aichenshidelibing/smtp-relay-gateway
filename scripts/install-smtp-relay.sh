@@ -309,7 +309,7 @@ read_cert_domain() {
 
 select_tls_mode() {
   echo
-  echo "请选择客户端到 Relay 的 TLS 证书方式："
+  echo "请选择客户端到中继服务的 TLS 证书方式："
   echo "  1) 自动生成自签证书（最简单；客户端严格校验证书时可能需要允许自签）"
   echo "  2) 自动申请 Let's Encrypt 正式证书（中文提示：需要域名解析到本机，并且 80 端口能从公网访问）"
   echo "  3) 使用已有 Let's Encrypt 证书（只填域名，脚本自动选择 /etc/letsencrypt/live/<域名>/ 路径）"
@@ -331,11 +331,11 @@ select_tls_mode() {
     2)
       echo
       echo "Let's Encrypt 自动申请说明："
-      echo "  - 请先把 Relay 域名解析到这台弱服务器。"
+      echo "  - 请先把 中继服务域名解析到这台中继服务器。"
       echo "  - 请确保云安全组/防火墙临时放行 TCP 80。"
       echo "  - 脚本会使用 certbot standalone 模式申请证书。"
       echo "  - 脚本不会要求你填写邮箱，会使用 certbot 的无邮箱注册参数。"
-      CERT_DOMAIN="$(read_cert_domain "请输入 Relay 域名，例如 smtp-relay.example.com")"
+      CERT_DOMAIN="$(read_cert_domain "请输入 中继服务域名，例如 smtp-relay.example.com")"
       MAILNAME="$CERT_DOMAIN"
       CERT_SOURCE="Let's Encrypt 自动申请：${CERT_DOMAIN}"
       ;;
@@ -479,7 +479,7 @@ EOF_PASSWD
 }
 
 configure_relay_auth() {
-  log "创建强服务器连接本 Relay 使用的账号"
+  log "创建应用服务器连接本中继服务 使用的账号"
   mkdir -p /etc/postfix/sasl
   cat > /etc/postfix/sasl/smtpd.conf <<'EOF_SASL'
 pwcheck_method: auxprop
@@ -593,8 +593,8 @@ print_summary() {
 安装完成
 ============================================================
 
-强服务器项目中填写：
-  SMTP_HOST      = 弱服务器 IP 或 DNS only/灰云域名
+应用服务器项目中填写：
+  SMTP_HOST      = 中继服务器IP或 DNS only/灰云域名
   SMTP_PORT      = ${RELAY_PORT}
   SMTP_USER      = ${RELAY_USER}
   SMTP_PASS      = 你刚才设置的 Relay 密码
@@ -614,7 +614,7 @@ print_summary() {
 
 重要安全提醒：
   1. Cloudflare 普通小黄云不能直接代理 SMTP/TCP，请用灰云 DNS only。
-  2. 云厂商安全组也要只允许强服务器 IP 访问 TCP ${RELAY_PORT}。
+  2. 云厂商安全组也要只允许应用服务器 IP 访问 TCP ${RELAY_PORT}。
   3. 上游 SMTP 密码/API Key 保存在 /etc/postfix/sasl_passwd，仅 root 可读。
   4. 如果使用自签证书，客户端需要允许该证书，或关闭严格证书校验；生产建议使用正式证书。
 
@@ -627,7 +627,7 @@ print_summary() {
 
 测试命令示例：
   swaks --to recipient@example.com --from ${UPSTREAM_USER} \\
-    --server <弱服务器IP> --port ${RELAY_PORT} \\
+    --server <中继服务器IP> --port ${RELAY_PORT} \\
     --auth LOGIN --auth-user ${RELAY_USER} --auth-password '<Relay密码>' --tls
 
 EOF_SUMMARY
@@ -641,14 +641,14 @@ main() {
 ============================================================
 通用 SMTP Relay 交互式安装器
 ============================================================
-此脚本会把当前弱服务器配置为一个需要认证和 STARTTLS 的 SMTP Relay。
-强服务器连接本 Relay，本 Relay 再登录你选择的上游 SMTP 服务商发信。
+此脚本会把当前 中继服务器配置为一个需要认证和 STARTTLS 的 SMTP Relay。
+应用服务器连接本中继服务，本中继服务 再登录你选择的上游 SMTP 服务商发信。
 EOF_BANNER
 
-  RELAY_PORT="$(read_default "Relay 对强服务器监听的端口" "2525")"
+  RELAY_PORT="$(read_default "中继服务对应用服务器开放的端口" "2525")"
   validate_port "$RELAY_PORT"
 
-  ALLOW_RAW="$(read_required "允许访问本 Relay 的强服务器公网 IP/CIDR，多个用逗号分隔，例如 203.0.113.10/32")"
+  ALLOW_RAW="$(read_required "允许访问本中继服务的应用服务器公网 IP/CIDR，多个用逗号分隔，例如 203.0.113.10/32")"
   ALLOW_CIDRS="$(normalize_cidrs "$ALLOW_RAW")"
   [[ -n "$ALLOW_CIDRS" ]] || fail "允许来源不能为空。"
 
@@ -658,7 +658,7 @@ EOF_BANNER
   UPSTREAM_PASS="$(read_secret_required "$UPSTREAM_PASSWORD_HINT")"
 
   RELAY_USER="relay"
-  RELAY_PASS="$(confirm_secret "强服务器连接本 Relay 的密码")"
+  RELAY_PASS="$(confirm_secret "应用服务器连接本中继服务 的密码")"
 
   select_tls_mode
 
