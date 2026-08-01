@@ -24,6 +24,7 @@ Gmail / Outlook / Microsoft 365 / SES / SendGrid / Mailgun / ...
 
 | 选项 | 服务商 | SMTP 地址 | 端口 | 加密 |
 |---:|---|---|---:|---|
+| 0 | 自动检测可用服务商（推荐） | - | - | - |
 | 1 | Gmail / Google Workspace | `smtp.gmail.com` | 587 | STARTTLS |
 | 2 | Outlook / Hotmail 个人邮箱 | `smtp-mail.outlook.com` | 587 | STARTTLS |
 | 3 | Microsoft 365 / Office 365 | `smtp.office365.com` | 587 | STARTTLS |
@@ -103,7 +104,7 @@ DNS only / 灰云
 在中继服务器上执行：
 
 ```bash
-git clone <你的仓库地址> smtp-relay-gateway
+git clone https://github.com/aichenshidelibing/smtp-relay-gateway.git
 cd smtp-relay-gateway
 sudo bash scripts/install-smtp-relay.sh
 ```
@@ -127,10 +128,15 @@ sudo bash scripts/install-smtp-relay.sh
 
 脚本会自动处理这些值，不再要求手动填写：
 
-- 中继服务用户名固定为 `relay`；
+- Relay 用户名密码可以在安装时自定义添加多个；
 - `mailname` / hostname 自动选择；
 - Let's Encrypt 申请不要求填写邮箱；
 - 基础限流参数使用安全默认值。
+
+安装时脚本会：
+- 自动检测可用的服务商（推荐选项 0）；
+- 验证上游 SMTP 账号凭据是否有效；
+- 支持添加多个 Relay 用户。
 
 ## 各服务商凭据获取教程
 
@@ -873,6 +879,14 @@ ss -lntp | grep 2525
 
 ## 卸载/回滚
 
+### 推荐：使用卸载脚本
+
+```bash
+sudo bash scripts/uninstall-smtp-relay.sh
+```
+
+### 手动回滚
+
 脚本每次运行会备份：
 
 ```text
@@ -880,7 +894,7 @@ ss -lntp | grep 2525
 /etc/postfix/master.cf.bak.<时间戳>
 ```
 
-如果需要回滚，找到对应备份后恢复：
+如果需要手动回滚，找到对应备份后恢复：
 
 ```bash
 sudo cp /etc/postfix/main.cf.bak.<时间戳> /etc/postfix/main.cf
@@ -888,18 +902,17 @@ sudo cp /etc/postfix/master.cf.bak.<时间戳> /etc/postfix/master.cf
 sudo systemctl restart postfix
 ```
 
-删除 Relay 用户：
+### 单独管理 Relay 用户
 
 ```bash
-sudo saslpasswd2 -d relay
-sudo systemctl restart postfix
-```
+# 添加用户
+sudo saslpasswd2 -a postfix -u <mailname> <username>
 
-删除上游 SMTP 密码文件：
+# 删除用户
+sudo saslpasswd2 -d <username>
 
-```bash
-sudo rm -f /etc/postfix/sasl_passwd /etc/postfix/sasl_passwd.db
-sudo systemctl restart postfix
+# 列出所有用户
+sudo sasldblistusers2
 ```
 
 ## 文件结构
@@ -908,12 +921,28 @@ sudo systemctl restart postfix
 smtp-relay-gateway/
   README.md
   scripts/
-    install-smtp-relay.sh
+    install-smtp-relay.sh    # 安装脚本
+    uninstall-smtp-relay.sh  # 卸载脚本
   examples/
     env.example
     nodemailer-example.js
     python-send-test.py
 ```
+
+## 卸载
+
+使用项目提供的卸载脚本：
+
+```bash
+sudo bash scripts/uninstall-smtp-relay.sh
+```
+
+卸载脚本会：
+- 停止 Postfix 服务；
+- 恢复或清理 Postfix 配置；
+- 删除所有 SASL 认证用户；
+- 删除上游 SMTP 密码文件；
+- 清理 UFW 防火墙规则。
 
 ## 生产建议
 
