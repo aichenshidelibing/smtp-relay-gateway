@@ -1012,9 +1012,14 @@ EOF_BANNER
   RELAY_PORT="$(read_default "中继服务对应用服务器开放的端口" "2525")"
   validate_port "$RELAY_PORT"
 
-  ALLOW_RAW="$(read_required "允许访问本中继服务的应用服务器公网 IP/CIDR，多个用逗号分隔，例如 203.0.113.10/32")"
-  ALLOW_CIDRS="$(normalize_cidrs "$ALLOW_RAW")"
-  [[ -n "$ALLOW_CIDRS" ]] || fail "允许来源不能为空。"
+  ALLOW_RAW="$(read_default "允许访问本中继服务的应用服务器公网 IP/CIDR，多个用逗号分隔，例如 203.0.113.10/32（回车跳过 = 不限制来源）")"
+  if [[ -z "$ALLOW_RAW" ]]; then
+    warn "未限制来源，任何 IP 都可以访问 Relay 服务！生产环境建议限制来源 IP。"
+    ALLOW_CIDRS="0.0.0.0/0"
+  else
+    ALLOW_CIDRS="$(normalize_cidrs "$ALLOW_RAW")"
+    [[ -n "$ALLOW_CIDRS" ]] || fail "允许来源不能为空。"
+  fi
 
   select_provider
 
