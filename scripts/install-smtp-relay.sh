@@ -316,7 +316,7 @@ detect_available_providers() {
 }
 
 # ============================================================
-# 上游账号验证
+# 上游账号验证（使用 Python smtplib）
 # ============================================================
 
 verify_upstream_credentials() {
@@ -328,58 +328,62 @@ verify_upstream_credentials() {
   local provider="$6"
 
   log "正在验证 ${provider} 上游账号..."
-
   echo "  提示: 如验证失败可跳过，不影响安装。"
 
-  # 首先测试 TLS 连接
-  local tls_output
-  local tls_ok=false
+  # 使用 Python smtplib 进行可靠验证
+  python3 - "$host" "$port" "$user" "$pass" "$tls_mode" "$provider" <<'PYEOF'
+import sys
+import smtplib
+import ssl
+import socket
 
-  if [[ "$tls_mode" == "ssl" ]]; then
-    tls_output=$(timeout 20 bash -c "echo 'QUIT' | openssl s_client -connect '${host}:${port}' 2>/dev/null" || true)
-  else
-    tls_output=$(timeout 20 bash -c "echo 'QUIT' | openssl s_client -connect '${host}:${port}' -starttls smtp 2>/dev/null" || true)
-  fi
+host = sys.argv[1]
+port = int(sys.argv[2])
+user = sys.argv[3]
+password = sys.argv[4]
+tls_mode = sys.argv[5]
+provider = sys.argv[6]
 
-  if echo "$tls_output" | grep -q "SSL handshake"; then
-    echo "  TLS 连接成功"
-    tls_ok=true
-  else
-    echo "  TLS 连接失败，请检查网络和端口是否可达"
-    return 1
-  fi
+def verify():
+    try:
+        if tls_mode == "ssl":
+            # 隐式 TLS (端口 465)
+            context = ssl.create_default_context()
+            with smtplib.SMTP_SSL(host, port, context=context, timeout=20) as server:
+                server.login(user, password)
+                print("  账号认证成功 ✓")
+                return True
+        else:
+            # STARTTLS (端口 587)
+            with smtplib.SMTP(host, port, timeout=20) as server:
+                server.ehlo()
+                server.starttls(context=ssl.create_default_context())
+                server.ehlo()
+                server.login(user, password)
+                print("  账号认证成功 ✓")
+                return True
+    except smtplib.SMTPAuthenticationError as e:
+        print(f"  账号认证失败: 用户名或密码错误")
+        print(f"  错误详情: {str(e)[:100]}")
+        return False
+    except smtplib.SMTPException as e:
+        print(f"  SMTP 连接错误: {str(e)[:100]}")
+        return False
+    except socket.timeout:
+        print(f"  连接超时，请检查网络和端口 {host}:{port}")
+        return False
+    except socket.error as e:
+        print(f"  连接失败: {str(e)[:100]}")
+        return False
+    except Exception as e:
+        print(f"  连接失败: {str(e)[:100]}")
+        return False
 
-  # 使用 swaks 进行完整认证验证
-  if command -v swaks >/dev/null 2>&1; then
-    echo "  使用 swaks 测试认证..."
+if __name__ == "__main__":
+    sys.exit(0 if verify() else 1)
+PYEOF
 
-    local swaks_output
-    if [[ "$tls_mode" == "ssl" ]]; then
-      swaks_output=$(timeout 30 swaks --server "$host" --port "$port" \
-        --auth-user "$user" --auth-password "$pass" \
-        --tls --to "test@example.com" 2>&1 || true)
-    else
-      swaks_output=$(timeout 30 swaks --server "$host" --port "$port" \
-        --auth-user "$user" --auth-password "$pass" \
-        --tls --to "test@example.com" 2>&1 || true)
-    fi
-
-    if echo "$swaks_output" | grep -qi "authentication successful"; then
-      echo "  账号认证成功"
-      return 0
-    elif echo "$swaks_output" | grep -qi "authentication failed\|535\|535\|Authentication invalid"; then
-      echo "  账号认证失败，请检查用户名和密码"
-      return 1
-    else
-      echo "  无法确定认证结果，假设通过（请手动验证）"
-      return 0
-    fi
-  else
-    echo "  提示: swaks 未安装，无法验证账号。请确保账号凭据正确。"
-    echo "  建议: apt-get install swaks"
-    # TLS 连通已验证，账号凭据需要用户自行确认
-    return 0
-  fi
+  return $?
 }
 
 default_hostname() {
