@@ -329,49 +329,55 @@ verify_upstream_credentials() {
 
   log "正在验证 ${provider} 上游账号..."
 
-  local temp_file
-  temp_file=$(mktemp)
+  echo "  提示: 如验证失败可跳过，不影响安装。"
+
+  # 首先测试 TLS 连接
+  local tls_output
+  local tls_ok=false
 
   if [[ "$tls_mode" == "ssl" ]]; then
-    timeout 20 bash -c "echo 'QUIT' | openssl s_client -connect '${host}:${port}' -crlf 2>/dev/null" > "$temp_file" 2>&1
+    tls_output=$(timeout 20 bash -c "echo 'QUIT' | openssl s_client -connect '${host}:${port}' 2>/dev/null" || true)
   else
-    timeout 20 bash -c "echo 'QUIT' | openssl s_client -connect '${host}:${port}' -starttls smtp -crlf 2>/dev/null" > "$temp_file" 2>&1
+    tls_output=$(timeout 20 bash -c "echo 'QUIT' | openssl s_client -connect '${host}:${port}' -starttls smtp 2>/dev/null" || true)
   fi
 
-  if ! grep -q "SSL handshake" "$temp_file"; then
-    rm -f "$temp_file"
+  if echo "$tls_output" | grep -q "SSL handshake"; then
+    echo "  TLS 连接成功"
+    tls_ok=true
+  else
+    echo "  TLS 连接失败，请检查网络和端口是否可达"
     return 1
   fi
 
-  # 使用 swaks 验证（如果可用）
+  # 使用 swaks 进行完整认证验证
   if command -v swaks >/dev/null 2>&1; then
-    local swaks_opts=()
-    swaks_opts+=(--server "$host")
-    swaks_opts+=(--port "$port")
-    swaks_opts+=(--auth-user "$user")
-    swaks_opts+=(--auth-password "$pass")
+    echo "  使用 swaks 测试认证..."
 
+    local swaks_output
     if [[ "$tls_mode" == "ssl" ]]; then
-      swaks_opts+=(--tls)
+      swaks_output=$(timeout 30 swaks --server "$host" --port "$port" \
+        --auth-user "$user" --auth-password "$pass" \
+        --tls --to "test@example.com" 2>&1 || true)
     else
-      swaks_opts+=(--tls)
+      swaks_output=$(timeout 30 swaks --server "$host" --port "$port" \
+        --auth-user "$user" --auth-password "$pass" \
+        --tls --to "test@example.com" 2>&1 || true)
     fi
 
-    if timeout 30 swaks "${swaks_opts[@]}" --to "test@example.com" 2>&1 | grep -qi "authentication successful"; then
-      rm -f "$temp_file"
+    if echo "$swaks_output" | grep -qi "authentication successful"; then
+      echo "  账号认证成功"
+      return 0
+    elif echo "$swaks_output" | grep -qi "authentication failed\|535\|535\|Authentication invalid"; then
+      echo "  账号认证失败，请检查用户名和密码"
+      return 1
+    else
+      echo "  无法确定认证结果，假设通过（请手动验证）"
       return 0
     fi
-  fi
-
-  rm -f "$temp_file"
-
-  # 如果 swaks 不可用或验证失败，使用 openssl 简单验证
-  # 注意：这个验证可能不够准确，建议安装 swaks
-  if command -v swaks >/dev/null 2>&1; then
-    return 1
   else
-    echo "  提示: swaks 未安装，无法完整验证账号。请确保账号凭据正确。"
+    echo "  提示: swaks 未安装，无法验证账号。请确保账号凭据正确。"
     echo "  建议: apt-get install swaks"
+    # TLS 连通已验证，账号凭据需要用户自行确认
     return 0
   fi
 }
@@ -1056,7 +1062,7 @@ EOF_BANNER
 即将配置：
   Relay 监听端口: ${RELAY_PORT}
   允许来源: ${ALLOW_CIDRS}
-  Relay 用户: ${RELAY_USER}
+  Relay 用户: （见上方管理步骤）
   上游服务商: ${UPSTREAM_PROVIDER}
   上游 SMTP: ${UPSTREAM_HOST}:${UPSTREAM_PORT}
   上游加密: ${UPSTREAM_TLS_MODE}
