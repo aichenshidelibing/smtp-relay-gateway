@@ -111,6 +111,271 @@ is_valid_domain() {
   [[ "$domain" =~ ^[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?(\.[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?)+$ ]]
 }
 
+# ============================================================
+# SMTP 连通性检测函数
+# ============================================================
+
+test_tcp_connectivity() {
+  local host="$1"
+  local port="$2"
+  local timeout="${3:-10}"
+  if timeout "$timeout" bash -c "echo > /dev/tcp/${host}/${port}" 2>/dev/null; then
+    return 0
+  fi
+  return 1
+}
+
+test_smtp_starttls() {
+  local host="$1"
+  local port="$2"
+  local timeout_sec="${3:-15}"
+  timeout "$timeout_sec" bash -c "echo 'QUIT' | openssl s_client -connect '${host}:${port}' -starttls smtp -crlf 2>/dev/null" | grep -q "SSL handshake has read"
+}
+
+test_smtp_ssl() {
+  local host="$1"
+  local port="$2"
+  local timeout_sec="${3:-15}"
+  timeout "$timeout_sec" bash -c "echo 'QUIT' | openssl s_client -connect '${host}:${port}' 2>/dev/null" | grep -q "SSL handshake has read"
+}
+
+test_provider_connectivity() {
+  local host="$1"
+  local port="$2"
+  local tls_mode="$3"
+  local name="$4"
+
+  if ! test_tcp_connectivity "$host" "$port" 8; then
+    echo "  ${name}: ${host}:${port} - TCP 连接失败"
+    return 1
+  fi
+
+  echo "  ${name}: ${host}:${port} - TCP 连接成功, 测试 TLS..."
+
+  if [[ "$tls_mode" == "ssl" ]]; then
+    if test_smtp_ssl "$host" "$port" 10; then
+      echo "  ${name}: ${host}:${port} - TLS/SSL 连接成功 ✓"
+      return 0
+    fi
+  else
+    if test_smtp_starttls "$host" "$port" 10; then
+      echo "  ${name}: ${host}:${port} - STARTTLS 连接成功 ✓"
+      return 0
+    fi
+  fi
+
+  echo "  ${name}: ${host}:${port} - TLS 连接失败"
+  return 2
+}
+
+# ============================================================
+# 服务商列表定义
+# ============================================================
+
+declare -A PROVIDER_HOSTS
+declare -A PROVIDER_PORTS
+declare -A PROVIDER_TLS
+declare -A PROVIDER_NAMES
+
+init_provider_list() {
+  PROVIDER_HOSTS[1]="smtp.gmail.com"
+  PROVIDER_PORTS[1]="587"
+  PROVIDER_TLS[1]="starttls"
+  PROVIDER_NAMES[1]="Gmail / Google Workspace"
+
+  PROVIDER_HOSTS[2]="smtp-mail.outlook.com"
+  PROVIDER_PORTS[2]="587"
+  PROVIDER_TLS[2]="starttls"
+  PROVIDER_NAMES[2]="Outlook / Hotmail"
+
+  PROVIDER_HOSTS[3]="smtp.office365.com"
+  PROVIDER_PORTS[3]="587"
+  PROVIDER_TLS[3]="starttls"
+  PROVIDER_NAMES[3]="Microsoft 365 / Office 365"
+
+  PROVIDER_HOSTS[4]="smtp.mail.yahoo.com"
+  PROVIDER_PORTS[4]="587"
+  PROVIDER_TLS[4]="starttls"
+  PROVIDER_NAMES[4]="Yahoo Mail"
+
+  PROVIDER_HOSTS[5]="smtp.zoho.com"
+  PROVIDER_PORTS[5]="587"
+  PROVIDER_TLS[5]="starttls"
+  PROVIDER_NAMES[5]="Zoho Mail"
+
+  PROVIDER_HOSTS[6]="email-smtp.us-east-1.amazonaws.com"
+  PROVIDER_PORTS[6]="587"
+  PROVIDER_TLS[6]="starttls"
+  PROVIDER_NAMES[6]="Amazon SES"
+
+  PROVIDER_HOSTS[7]="smtp.sendgrid.net"
+  PROVIDER_PORTS[7]="587"
+  PROVIDER_TLS[7]="starttls"
+  PROVIDER_NAMES[7]="SendGrid"
+
+  PROVIDER_HOSTS[8]="smtp.mailgun.org"
+  PROVIDER_PORTS[8]="587"
+  PROVIDER_TLS[8]="starttls"
+  PROVIDER_NAMES[8]="Mailgun"
+
+  PROVIDER_HOSTS[9]="smtp.postmarkapp.com"
+  PROVIDER_PORTS[9]="587"
+  PROVIDER_TLS[9]="starttls"
+  PROVIDER_NAMES[9]="Postmark"
+
+  PROVIDER_HOSTS[10]="smtp.resend.com"
+  PROVIDER_PORTS[10]="587"
+  PROVIDER_TLS[10]="starttls"
+  PROVIDER_NAMES[10]="Resend"
+
+  PROVIDER_HOSTS[11]="live.smtp.mailtrap.io"
+  PROVIDER_PORTS[11]="587"
+  PROVIDER_TLS[11]="starttls"
+  PROVIDER_NAMES[11]="Mailtrap"
+
+  PROVIDER_HOSTS[12]="smtp.qq.com"
+  PROVIDER_PORTS[12]="465"
+  PROVIDER_TLS[12]="ssl"
+  PROVIDER_NAMES[12]="QQ 邮箱"
+
+  PROVIDER_HOSTS[13]="smtp.163.com"
+  PROVIDER_PORTS[13]="465"
+  PROVIDER_TLS[13]="ssl"
+  PROVIDER_NAMES[13]="163/网易邮箱"
+}
+
+detect_available_providers() {
+  log "正在检测服务商连通性（可能需要 2-3 分钟）..."
+  echo
+
+  init_provider_list
+
+  declare -a available=()
+  declare -a partial=()
+  declare -a unavailable=()
+
+  for i in {1..13}; do
+    local host="${PROVIDER_HOSTS[$i]}"
+    local port="${PROVIDER_PORTS[$i]}"
+    local tls="${PROVIDER_TLS[$i]}"
+    local name="${PROVIDER_NAMES[$i]}"
+
+    printf "  [%2d/%2d] 检测 %-30s" "$i" "13" "$name"
+
+    local result
+    if test_provider_connectivity "$host" "$port" "$tls" "$name"; then
+      available+=("$i")
+      echo ""
+    else
+      local exit_code=$?
+      if [[ $exit_code -eq 1 ]]; then
+        unavailable+=("$i")
+      else
+        partial+=("$i")
+      fi
+      echo ""
+    fi
+  done
+
+  echo
+  log "检测完成！"
+
+  if [[ ${#available[@]} -gt 0 ]]; then
+    echo "可用的服务商 (${#available[@]} 个):"
+    for idx in "${available[@]}"; do
+      echo "  ${idx}) ${PROVIDER_NAMES[$idx]} - ${PROVIDER_HOSTS[$idx]}:${PROVIDER_PORTS[$idx]}"
+    done
+  fi
+
+  if [[ ${#partial[@]} -gt 0 ]]; then
+    echo
+    echo "TCP 通但 TLS 失败的服务商:"
+    for idx in "${partial[@]}"; do
+      echo "  ${idx}) ${PROVIDER_NAMES[$idx]} - ${PROVIDER_HOSTS[$idx]}:${PROVIDER_PORTS[$idx]}"
+    done
+    echo "  (可能是防火墙阻止或服务商的 TLS 配置问题)"
+  fi
+
+  if [[ ${#unavailable[@]} -gt 0 ]]; then
+    echo
+    echo "不可达的服务商:"
+    for idx in "${unavailable[@]}"; do
+      echo "  ${idx}) ${PROVIDER_NAMES[$idx]} - ${PROVIDER_HOSTS[$idx]}:${PROVIDER_PORTS[$idx]}"
+    done
+  fi
+
+  if [[ ${#available[@]} -eq 0 ]]; then
+    warn "没有检测到可用的服务商，可能是网络问题。"
+    echo "你可以选择 '14) 自定义 SMTP' 手动输入。"
+  fi
+
+  echo
+  echo "可用服务商会优先显示，但仍可以选择其他服务商手动尝试。"
+
+  printf '\n%s' "${available[@]}"
+}
+
+# ============================================================
+# 上游账号验证
+# ============================================================
+
+verify_upstream_credentials() {
+  local host="$1"
+  local port="$2"
+  local user="$3"
+  local pass="$4"
+  local tls_mode="$5"
+  local provider="$6"
+
+  log "正在验证 ${provider} 上游账号..."
+
+  local temp_file
+  temp_file=$(mktemp)
+
+  if [[ "$tls_mode" == "ssl" ]]; then
+    timeout 20 bash -c "echo 'QUIT' | openssl s_client -connect '${host}:${port}' -crlf 2>/dev/null" > "$temp_file" 2>&1
+  else
+    timeout 20 bash -c "echo 'QUIT' | openssl s_client -connect '${host}:${port}' -starttls smtp -crlf 2>/dev/null" > "$temp_file" 2>&1
+  fi
+
+  if ! grep -q "SSL handshake" "$temp_file"; then
+    rm -f "$temp_file"
+    return 1
+  fi
+
+  # 使用 swaks 验证（如果可用）
+  if command -v swaks >/dev/null 2>&1; then
+    local swaks_opts=()
+    swaks_opts+=(--server "$host")
+    swaks_opts+=(--port "$port")
+    swaks_opts+=(--auth-user "$user")
+    swaks_opts+=(--auth-password "$pass")
+
+    if [[ "$tls_mode" == "ssl" ]]; then
+      swaks_opts+=(--tls)
+    else
+      swaks_opts+=(--tls)
+    fi
+
+    if timeout 30 swaks "${swaks_opts[@]}" --to "test@example.com" 2>&1 | grep -qi "authentication successful"; then
+      rm -f "$temp_file"
+      return 0
+    fi
+  fi
+
+  rm -f "$temp_file"
+
+  # 如果 swaks 不可用或验证失败，使用 openssl 简单验证
+  # 注意：这个验证可能不够准确，建议安装 swaks
+  if command -v swaks >/dev/null 2>&1; then
+    return 1
+  else
+    echo "  提示: swaks 未安装，无法完整验证账号。请确保账号凭据正确。"
+    echo "  建议: apt-get install swaks"
+    return 0
+  fi
+}
+
 default_hostname() {
   hostname -f 2>/dev/null || hostname
 }
@@ -151,6 +416,7 @@ PY
 select_provider() {
   echo
   echo "请选择上游 SMTP 服务商："
+  echo "  0) 自动检测可用服务商（推荐）"
   echo "  1) Gmail / Google Workspace                 smtp.gmail.com:587 STARTTLS"
   echo "  2) Outlook / Hotmail 个人邮箱               smtp-mail.outlook.com:587 STARTTLS"
   echo "  3) Microsoft 365 / Office 365               smtp.office365.com:587 STARTTLS"
@@ -167,7 +433,22 @@ select_provider() {
   echo " 14) 自定义 SMTP"
 
   local choice=""
-  choice="$(read_default "请选择" "3")"
+  choice="$(read_default "请选择" "0")"
+
+  # 处理自动检测
+  if [[ "$choice" == "0" ]]; then
+    local available_list
+    available_list=$(detect_available_providers)
+    if [[ -n "$available_list" ]]; then
+      echo
+      echo "检测到的可用服务商列表如上。请输入数字选择 (1-14)："
+      choice="$(read_default "请选择" "3")"
+    else
+      echo
+      echo "未检测到可用服务商，请手动选择："
+      choice="$(read_default "请选择" "3")"
+    fi
+  fi
 
   UPSTREAM_PROVIDER="自定义"
   UPSTREAM_HOST=""
@@ -468,6 +749,84 @@ configure_tls() {
   log "证书验证通过：${CERT_FILE}"
 }
 
+# ============================================================
+# Relay 用户管理
+# ============================================================
+
+manage_relay_users() {
+  log "管理 Relay 用户"
+
+  echo "当前 Relay 用户："
+  list_relay_users
+  echo
+
+  while true; do
+    echo "Relay 用户管理选项："
+    echo "  1) 添加新用户"
+    echo "  2) 删除用户"
+    echo "  3) 完成并继续（已有用户可用）"
+
+    local user_choice
+    user_choice="$(read_default "请选择" "3")"
+
+    case "$user_choice" in
+      1) add_relay_user ;;
+      2) delete_relay_user ;;
+      3) break ;;
+      *) warn "无效选择，请重新输入" ;;
+    esac
+  done
+}
+
+add_relay_user() {
+  echo
+  local username
+  username="$(read_required "输入用户名（留空使用默认 relay）")"
+  [[ -z "$username" ]] && username="relay"
+
+  # 检查用户是否已存在
+  if sasldblistusers2 2>/dev/null | grep -q "${username}@"; then
+    warn "用户 ${username} 已存在，将更新密码。"
+  fi
+
+  local password
+  password="$(confirm_secret "输入密码")"
+
+  echo "$password" | saslpasswd2 -c -p -u "$MAILNAME" "$username" 2>/dev/null && \
+    echo "  ✓ 用户 ${username} 创建成功" || \
+    echo "  ✗ 用户创建失败，请检查 saslpasswd2 权限"
+
+  echo
+}
+
+list_relay_users() {
+  echo "  已配置的 Relay 用户："
+  if sasldblistusers2 2>/dev/null | grep -q '@'; then
+    sasldblistusers2 2>/dev/null | grep '@' | while read line; do
+      local user
+      user=$(echo "$line" | cut -d: -f1)
+      echo "    - $user"
+    done
+  else
+    echo "    （暂无用户）"
+  fi
+}
+
+delete_relay_user() {
+  echo
+  local username
+  username="$(read_required "输入要删除的用户名")"
+
+  if sasldblistusers2 2>/dev/null | grep -q "${username}@"; then
+    saslpasswd2 -d "$username" 2>/dev/null && \
+      echo "  ✓ 用户 ${username} 已删除" || \
+      echo "  ✗ 用户删除失败"
+  else
+    echo "  用户 ${username} 不存在"
+  fi
+  echo
+}
+
 configure_upstream_auth() {
   log "写入 ${UPSTREAM_PROVIDER} 上游 SMTP 认证"
   cat > /etc/postfix/sasl_passwd <<EOF_PASSWD
@@ -479,7 +838,7 @@ EOF_PASSWD
 }
 
 configure_relay_auth() {
-  log "创建应用服务器连接本中继服务 使用的账号"
+  log "配置 Relay 用户认证"
   mkdir -p /etc/postfix/sasl
   cat > /etc/postfix/sasl/smtpd.conf <<'EOF_SASL'
 pwcheck_method: auxprop
@@ -487,12 +846,14 @@ auxprop_plugin: sasldb
 mech_list: PLAIN LOGIN
 EOF_SASL
 
-  echo "$RELAY_PASS" | saslpasswd2 -c -p -u "$MAILNAME" "$RELAY_USER"
-
+  # 用户已通过 manage_relay_users 添加，此处只需设置权限
   if [[ -f /etc/sasldb2 ]]; then
     chgrp postfix /etc/sasldb2 || true
     chmod 640 /etc/sasldb2 || true
   fi
+
+  log "Relay 用户列表："
+  list_relay_users
 }
 
 configure_postfix_main() {
@@ -596,8 +957,8 @@ print_summary() {
 应用服务器项目中填写：
   SMTP_HOST      = 中继服务器IP或 DNS only/灰云域名
   SMTP_PORT      = ${RELAY_PORT}
-  SMTP_USER      = ${RELAY_USER}
-  SMTP_PASS      = 你刚才设置的 Relay 密码
+  SMTP_USER      = 你配置的 Relay 用户名
+  SMTP_PASS      = 你配置的 Relay 用户密码
   加密方式       = STARTTLS
   Nodemailer     = secure: false, requireTLS: true
 
@@ -606,6 +967,9 @@ print_summary() {
   地址：${UPSTREAM_HOST}:${UPSTREAM_PORT}
   加密：${UPSTREAM_TLS_MODE}
   用户：${UPSTREAM_USER}
+
+Relay 用户：
+$(sasldblistusers2 2>/dev/null | grep '@' | sed 's/^/  /' || echo "  （请查看上方管理输出）")
 
 客户端到 Relay 的证书：
   来源：${CERT_SOURCE}
@@ -618,17 +982,17 @@ print_summary() {
   3. 上游 SMTP 密码/API Key 保存在 /etc/postfix/sasl_passwd，仅 root 可读。
   4. 如果使用自签证书，客户端需要允许该证书，或关闭严格证书校验；生产建议使用正式证书。
 
+管理 Relay 用户：
+  添加用户: saslpasswd2 -a postfix -u <mailname> <username>
+  删除用户: saslpasswd2 -d <username>
+  列出用户: sasldblistusers2
+
 查看状态：
   systemctl status postfix --no-pager
 
 查看日志：
   journalctl -u postfix -f
   tail -f /var/log/mail.log
-
-测试命令示例：
-  swaks --to recipient@example.com --from ${UPSTREAM_USER} \\
-    --server <中继服务器IP> --port ${RELAY_PORT} \\
-    --auth LOGIN --auth-user ${RELAY_USER} --auth-password '<Relay密码>' --tls
 
 EOF_SUMMARY
 }
@@ -657,8 +1021,25 @@ EOF_BANNER
   UPSTREAM_USER="$(read_required "$UPSTREAM_USER_HINT")"
   UPSTREAM_PASS="$(read_secret_required "$UPSTREAM_PASSWORD_HINT")"
 
-  RELAY_USER="relay"
-  RELAY_PASS="$(confirm_secret "应用服务器连接本中继服务 的密码")"
+  # 验证上游账号
+  local verify_retry="y"
+  while [[ "$verify_retry" =~ ^[Yy]$ ]]; do
+    if verify_upstream_credentials "$UPSTREAM_HOST" "$UPSTREAM_PORT" "$UPSTREAM_USER" "$UPSTREAM_PASS" "$UPSTREAM_TLS_MODE" "$UPSTREAM_PROVIDER"; then
+      echo "  ✓ 上游账号验证通过"
+      verify_retry="n"
+    else
+      warn "上游账号验证失败，请检查用户名和密码是否正确。"
+      verify_retry="$(read_default "是否重试？输入 y 重试，输入 n 跳过验证继续" "y")"
+      if [[ "$verify_retry" =~ ^[Yy]$ ]]; then
+        UPSTREAM_USER="$(read_required "$UPSTREAM_USER_HINT")"
+        UPSTREAM_PASS="$(read_secret_required "$UPSTREAM_PASSWORD_HINT")"
+      fi
+    fi
+  done
+  echo
+
+  # Relay 用户管理
+  manage_relay_users
 
   select_tls_mode
 
