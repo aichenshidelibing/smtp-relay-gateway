@@ -37,7 +37,7 @@ confirm() {
   local default="${2:-no}"
   local value=""
   value="$(read_default "$prompt" "$default")"
-  [[ "$value" =~ ^[Yy]$ ]]
+  [[ "$value" =~ ^[Yy] ]]
 }
 
 # ============================================================
